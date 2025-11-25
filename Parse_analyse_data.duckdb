@@ -1,0 +1,86 @@
+DROP TABLE IF EXISTS steam_games_raw;
+CREATE TABLE steam_games_raw AS
+SELECT UNNEST(games) as json_games_data
+FROM read_json_auto('https://github.com/vintagedon/steam-dataset-2025/raw/refs/heads/main/data/01_raw/steam_2025_5k-dataset-games_20250831.json.gz',
+                    maximum_object_size = 999671864);
+
+DROP TABLE IF EXISTS steam_games_clean;
+
+CREATE TABLE steam_games_clean AS
+WITH intermediate AS (
+    SELECT
+        json_games_data -> 'app_details' -> 'data' as d
+    FROM steam_games_raw
+)
+SELECT
+    (d ->> 'steam_appid')::INT AS app_id,
+    d ->> 'name' AS app_name,
+
+    COALESCE(TRY_CAST(d -> 'price_overview' ->> 'final' AS FLOAT) / 100.0, 0) AS price_usd,
+
+    TRY_CAST(RIGHT(d -> 'release_date' ->> 'date', 4) AS INT) AS release_year,
+
+    TRY_CAST(d -> 'recommendations' ->> 'total' AS INT) AS review_count,
+
+    list_transform(
+                      CAST(d -> 'genres' AS STRUCT(id VARCHAR, description VARCHAR)[]),
+    x -> x.description
+    ) AS genres,
+
+    list_transform(
+                      CAST(d -> 'categories' AS STRUCT(id VARCHAR, description VARCHAR)[]),
+    x -> x.description
+    ) AS categories
+
+    FROM intermediate
+    WHERE d IS NOT NULL;
+
+DESCRIBE steam_games_clean;
+SELECT app_name, genres, categories FROM steam_games_clean LIMIT 5;
+
+-- Top 20 games by number of reviews
+SELECT
+    app_name,
+    review_count,
+    price_usd
+FROM steam_games_clean
+ORDER BY review_count DESC NULLS LAST
+    LIMIT 20;
+
+-- Distribution of dame release years
+SELECT
+    release_year,
+    COUNT(*) as game_count
+FROM steam_games_clean
+WHERE release_year IS NOT NULL
+GROUP BY release_year
+ORDER BY release_year DESC;
+
+-- Average price per genre, excluding free games
+SELECT
+    genre,
+    COUNT(*) as games_count,
+    ROUND(AVG(price_usd), 2) as avg_price
+FROM steam_games_clean,
+     UNNEST(genres) AS t(genre)
+WHERE price_usd > 0
+GROUP BY genre
+ORDER BY avg_price DESC;
+
+-- Most common categories
+SELECT
+    category,
+    COUNT(*) as frequency
+FROM steam_games_clean,
+     UNNEST(categories) AS t(category)
+GROUP BY category
+ORDER BY frequency DESC
+    LIMIT 10;
+
+-- Free vs paid games
+SELECT
+    CASE WHEN price_usd = 0 THEN 'Free-to-Play' ELSE 'Premium' END as model,
+    COUNT(*) as total_games,
+    ROUND(AVG(review_count), 0) as avg_reviews
+FROM steam_games_clean
+GROUP BY model;
